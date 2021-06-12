@@ -2,18 +2,27 @@ require('dotenv').config();
 var io = require('socket.io')(server);
 var express = require('express');
 var app = express();
-app.use(express.static('./www'));
-
 var server = require('http').Server(app);
 var io = require('socket.io')(server);
+var helper = require('./helper');
 
-// port
-server.listen(process.env.PORT || 8080, function(){
-	console.log('server dang chay....');
+app.get('/', (req, res) => {
+    res.send('Server Running...');
 });
 
-// tài xỉu
 
+// port
+server.listen(process.env.PORT || 8080, () => console.log('Server Started At Port: '+ process.env.PORT || 8080));
+
+const connection = require('./database');
+const util = require('util');
+
+// node native promisify
+const query = util.promisify(connection.query).bind(connection);
+
+
+
+// tài xỉu
 
 var Taixiu = function(){
 
@@ -45,31 +54,36 @@ var Taixiu = function(){
         seft.idChonTai           = []; // array id chọn tài
         seft.idChonXiu           = []; // array id chọn xỉu
         seft.time = seft.timeDatCuoc;
-        console.log('newgame');
+
+        console.log('Bắt Đầu Phiên Mới');
+
+
         io.sockets.emit('gameStart', this.ketQua);
         loopAGame = setInterval(function() {              
             seft.time--;
             io.sockets.emit('gameData', { 
-                idGame        : seft.idPhien,
+                idGame : seft.idPhien,
                 userTai: seft.userTai, 
                 userXiu: seft.userXiu, 
                 moneyTai: seft.moneyTai, 
                 moneyXiu: seft.moneyXiu, 
-                userTai: seft.userTai, 
-                time          : seft.time, 
+                userTai : seft.userTai, 
+                time   : seft.time, 
             });
             
             ketqua = seft.gameRandomResult();
-            console.log( 'idGame:' + seft.idPhien);
-            console.log( 'userTai:' + seft.userTai);
-            console.log( 'userXiu:' + seft.userXiu);
-            console.log( 'moneyTai:' + seft.moneyTai);
-            console.log( 'moneyXiu:' + seft.moneyXiu);
-            console.log( 'time:' + seft.time);
+            console.log( 'ID GAME: #' + seft.idPhien);
+            console.log( 'USER Đặt Tài: ' + seft.userTai);
+            console.log( 'USER Đặt Xỉu: ' + seft.userXiu);
+            console.log( 'MONEY Tài: ' + helper.number_format(seft.moneyTai));
+            console.log( 'MONEY Xỉu: ' + helper.number_format(seft.moneyXiu));
+            console.log( 'Thời Gian: ' + seft.time);
+            console.log( '---------------');
             if (seft.time == 0){
                 clearInterval(loopAGame);
                 seft.gameOver();
             }
+
         }, 1000);
         // console.log( 'moneyXiu:' + JSON.stringify(ketqua));
 
@@ -79,7 +93,7 @@ var Taixiu = function(){
 
 
     // game kết thúc
-    this.gameOver = function(){
+    this.gameOver = async () => {
         seft = this;
         seft.coTheDatCuoc  = false // không thể đặt
         seft.time = seft.timechophienmoi;
@@ -90,10 +104,25 @@ var Taixiu = function(){
                 time   : seft.time - 5, 
         });
         console.log(JSON.stringify(this.ketQua));
-        idWin = this.ketQua.result == 'tai' ? seft.idChonTai : seft.idChonXiu;
-        idWin.forEach((data)=>{
+
+        db.importResult(seft.idPhien, this.ketQua.dice1, this.ketQua.dice2, this.ketQua.dice3);
+
+
+        arrayIdWin = this.ketQua.result == 'tai' ? seft.idChonTai : seft.idChonXiu;
+        arrayIdLost  = this.ketQua.result == 'xiu' ? seft.idChonTai : seft.idChonXiu;
+
+
+        arrayIdWin.forEach(async (data) => {
+            const sql = await db.moneyExec(data.userid, 'cong', data.tien);
             io.to(data.id).emit('winGame', {
                 msg: 'Bạn đã thắng '+ data.tien + ' xu'
+            });
+        });
+
+        arrayIdLost.forEach(async (data) => {
+            const sql = await db.moneyExec(data.userid, 'tru', data.tien);
+            io.to(data.id).emit('lostGame', {
+                msg: 'Bạn đã thua '+ data.tien + ' xu'
             });
         });
 
@@ -119,7 +148,7 @@ var Taixiu = function(){
 
 
     // đặt cược
-    this.putMoney = function(id,cau,tien){
+    this.putMoney = function(id,cau,tien, userID){
         // nếu đang trong thời gian chờ (coTheDatCuoc == false)
         if (this.coTheDatCuoc == false){
             return {
@@ -127,6 +156,7 @@ var Taixiu = function(){
                 error   : 'Không thể đặt, vui lòng chờ giây lát'
             };
         }
+
         if(cau == 'tai'){
             // thêm tiền vào tổng số tiền đặt tài
             this.moneyTai += tien;
@@ -134,6 +164,7 @@ var Taixiu = function(){
             if(!this.idChonTai.find(x => x.id === id)){ 
                 this.idChonTai.push({
                     id   : id,
+                    userid : userID,
                     cau  : 'tai',
                     tien : tien
                 });
@@ -150,6 +181,7 @@ var Taixiu = function(){
             if(!this.idChonXiu.find(x => x.id === id)){ 
                 this.idChonXiu.push({
                     id   : id,
+                    userid : userID,
                     cau  : 'xiu',
                     tien : tien
                 });
@@ -180,12 +212,130 @@ var Taixiu = function(){
     
 }
 
-tx = new Taixiu();
 
-io.on('connection', function (socket) {
-    socket.on('pull', function (data) {
-        msg = tx.putMoney(data.id,data.dice,data.money);
-        socket.emit('pull', msg);
+var DB = function () {
+    this.token;
+
+    this.authToken = async (authToken) => {
+        const user = await query("SELECT * FROM `users` WHERE `token`='"+ authToken +"'");
+            if(user.length != 0) {
+                if(!user[0].id) {
+                    return false;
+                }else {
+                    return true;
+                }                
+            }else {
+                return false;
+            }
+    }
+
+
+    this.userInfo = async (authToken) => {
+        const user = await query("SELECT * FROM `users` WHERE `token`='"+ authToken +"'");
+            if(user.length != 0) {
+                if(!user[0].id) {
+                    return null;
+                }else {
+                    return user[0];
+                }                
+            }else {
+                return null;
+            }
+    }
+
+    this.moneyExec = async (userId, type, money) => {
+        switch(type) {
+            case 'cong':
+                await query("UPDATE `users` SET `vnd` = `vnd` + '"+ money +"' WHERE `id` = '"+ userId +"'");
+            break;
+
+            case 'tru':
+                await query("UPDATE `users` SET `vnd` = `vnd` - '"+ money +"' WHERE `id` = '"+ userId +"'");
+            break;
+
+        }
+    }
+
+    this.importResult = async (roundId, dice1, dice2, dice3) => {
+        const time = helper.timestamp();
+        const tong = dice1 + dice2 + dice3;
+        const result = (tong > 9) ? 'tai' : 'xiu';
+        await query("INSERT INTO `taixiu_history` (`round_id`, `dice1`, `dice2`, `dice3`, `result`, `time`) VALUES ('" + roundId + "', '" + dice1 + "', '" + dice2 + "', '" + dice3 + "', '" + result + "', '"+ time +"')");
+    }
+
+    this.exportBridge = async () => {
+        const bridge = await query("SELECT `result` FROM `taixiu_history` ORDER BY `id` DESC LIMIT 0, 13");
+        return bridge;
+    }
+
+}
+
+
+const GAME = async () => {
+
+    authenStatus = false;
+
+
+    tx = new Taixiu();
+
+    io.on('connection', async (socket) => {
+        let authToken = socket.handshake.query.token;
+
+        db = new DB(); 
+        const authen = await db.authToken(authToken);
+        console.log('Authencation Token: ' + authToken + ' => ' + authen);
+        (authen == false) ? authenStatus = false : authenStatus = true;
+
+        socket.on('pull', async (data) => {
+            if(!authenStatus) {
+                socket.emit('pull', {
+                        status  : 'error',
+                        error   : 'Xác thực người dùng thất bại!'
+                    });
+            }else {
+
+                const userInfo = await db.userInfo(authToken);
+                if(userInfo != null) {
+                    // đặt tiền
+                    if(userInfo.vnd < data.money) {
+                        socket.emit('pull', {
+                            status  : 'error',
+                            error   : 'Bạn không đủ tiền để đặt!'
+                        });
+                    }else {
+                        // trừ tiền mỗi lần đặt
+                        await query("UPDATE `users` SET `vnd` = `vnd` - '"+ data.money +"' WHERE `id` = '"+ userInfo.id +"'");
+                        console.log(userInfo.name + ' Đặt ' + data.money);
+                        msg = tx.putMoney(data.id, data.dice, data.money, userInfo.id);
+                        socket.emit('pull', msg);                          
+                    }
+                }else {
+                    socket.emit('pull', {
+                        status  : 'error',
+                        error   : 'Không truy vấn được tài khoản hiện tại!'
+                    });
+                }
+    
+            }
+
+        });
+
+
+        // list cầu
+        socket.on('bridge', async (data) => {
+            socket.emit('bridge', {
+                data   : await db.exportBridge()
+            });
+        });
+
+
+
+
+
     });
-});
-tx.gameStart();
+
+    tx.gameStart();    
+}
+
+// Game Initialization
+GAME();
